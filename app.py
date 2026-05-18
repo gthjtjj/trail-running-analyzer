@@ -27,25 +27,7 @@ COLOR_MAP = {
     '平地': '#228B22', '缓下坡': '#00FFFF', '陡下坡': '#1E90FF', '极陡下坡': '#00008B'
 }
 
-@st.cache_data
-def process_gpx(file):
-    gpx = gpxpy.parse(file)
-    points = []
-    for track in gpx.tracks:
-        for segment in track.segments:
-            for point in segment.points:
-                points.append([point.latitude, point.longitude, point.elevation])
-    
-    df = pd.DataFrame(points, columns=['lat', 'lon', 'ele'])
-    df['dist_diff'] = 0.0
-    for i in range(1, len(df)):
-        df.loc[i, 'dist_diff'] = gpxpy.geo.distance(df.loc[i-1, 'lat'], df.loc[i-1, 'lon'], None, df.loc[i, 'lat'], df.loc[i, 'lon'], None)
-    
-    df['cum_dist_km'] = df['dist_diff'].cumsum() / 1000.0
-    df['ele_diff'] = df['ele'].diff().fillna(0)
-    df['slope'] = np.where(df['dist_diff'] > 0, (df['ele_diff'] / df['dist_diff']) * 100, 0)
-    df['slope_class'] = df['slope'].apply(classify_slope)
-    return df
+
 
 # --- 3. 侧边栏设置 ---
 st.sidebar.header("⏱️ 1. 基础配速设置 (min/km)")
@@ -63,7 +45,57 @@ st.sidebar.markdown("---")
 
 st.sidebar.header("📉 2. 体能衰减模型")
 fatigue_rate = st.sidebar.slider("每 10 公里配速衰减比例 (%)", min_value=0, max_value=20, value=5, step=1) / 100.0
+@st.cache_data
+def process_gpx(file):
+    try:
+        gpx_content = file.read().decode("utf-8")
+        gpx = gpxpy.parse(gpx_content)
+    except Exception:
+        try:
+            file.seek(0)
+            gpx_content = file.read().decode("gbk")
+            gpx = gpxpy.parse(gpx_content)
+        except Exception:
+            st.error("❌ GPX文件编码或格式解析失败！")
+            return None
 
+    points = []
+    for track in gpx.tracks:
+        for segment in track.segments:
+            for point in segment.points:
+                ele = point.elevation if point.elevation is not None else 0.0
+                points.append([point.latitude, point.longitude, ele])
+    
+    if len(points) == 0:
+        st.error("❌ 未找到有效轨迹坐标点！")
+        return None
+        
+    df = pd.DataFrame(points, columns=['lat', 'lon', 'ele'])
+
+    # === 🛑 核心降噪步骤 1：海拔滑动平均滤波 🛑 ===
+    # 使用 15 个点的窗口进行平滑（大约代表 30-50 米的距离），抹平 GPS 锯齿噪声
+    df['ele_filtered'] = df['ele'].rolling(window=15, min_periods=1, center=True).mean()
+
+    # 计算两点间距离
+    df['dist_diff'] = 0.0
+    for i in range(1, len(df)):
+        df.loc[i, 'dist_diff'] = gpxpy.geo.distance(df.loc[i-1, 'lat'], df.loc[i-1, 'lon'], None, df.loc[i, 'lat'], df.loc[i, 'lon'], None)
+    
+    df['cum_dist_km'] = df['dist_diff'].cumsum() / 1000.0
+    
+    # === 🛑 核心降噪步骤 2：过滤无意义的爬升微小震荡 🛑 ===
+    df['ele_diff'] = df['ele_filtered'].diff().fillna(0)
+    # 只有当高度变化绝对值大于 0.3 米时才记录，避免平地杂讯累加
+    df['ele_diff_clean'] = np.where(df['ele_diff'].abs() > 0.3, df['ele_diff'], 0.0)
+    
+    # === 🛑 核心降噪步骤 3：基于区间（如50米）重算坡度，防止坡度碎裂 🛑 ===
+    # 坡度计算不再看相邻单点，而是看前 10 个点到后 10 个点的整体趋势
+    df['slope'] = np.where(df['dist_diff'] > 0, (df['ele_diff'] / df['dist_diff']) * 100, 0)
+    # 坡度平滑：让颜色标注呈现块状分布，更符合实际赛道感觉
+    df['slope_smoothed'] = df['slope'].rolling(window=21, min_periods=1, center=True).mean()
+    df['slope_class'] = df['slope_smoothed'].apply(classify_slope)
+    
+    return df
 st.sidebar.markdown("---")
 
 st.sidebar.header("📍 3. 赛事 CP 点设置")
@@ -84,8 +116,9 @@ if uploaded_file:
     df = process_gpx(uploaded_file)
     
     total_dist = df['dist_diff'].sum() / 1000.0
-    total_ascent = df[df['ele_diff'] > 0]['ele_diff'].sum()
-    total_descent = abs(df[df['ele_diff'] < 0]['ele_diff'].sum())
+    # 找到主代码中这一段并替换：
+    total_ascent = df[df['ele_diff_clean'] > 0]['ele_diff_clean'].sum()
+    total_descent = abs(df[df['ele_diff_clean'] < 0]['ele_diff_clean'].sum())
     
     # 动态构建切分区间与标签
     break_points = [0.0] + [x for x in cp_distances if 0 < x < total_dist] + [total_dist]
