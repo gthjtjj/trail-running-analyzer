@@ -140,7 +140,7 @@ def process_gpx_hardcore(file, min_sampling_dist, vertical_threshold):
         name_node = wpt.find('.//{*}name')
         wpt_name = name_node.text if name_node is not None and name_node.text else "未命名CP点"
         wpt_lat = float(wpt.get('lat'))
-        wpt_lon = float(wpt.get('wpt'))
+        wpt_lon = float(wpt.get('lon'))
         
         # 修正可能取错经纬度属性的问题
         try:
