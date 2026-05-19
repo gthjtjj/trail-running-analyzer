@@ -7,13 +7,13 @@ from math import radians, cos, sin, asin, sqrt
 
 # --- 1. 页面基本配置 ---
 st.set_page_config(
-    page_title="越野跑赛道智能分析预测器 Ultimate v3", 
+    page_title="越野跑赛道智能分析预测器 v4", 
     layout="wide", 
     initial_sidebar_state="expanded"
 )
 
-st.title("🏃‍♂️ 跑者硬核路书：越野跑赛道智能分析预测器 (高程无损积分版)")
-st.markdown("本程序采用 **残差能量积分器机制**，专门修复手表/手机导出的 GPX 固有的 15%-20% 缓坡爬升丢失问题。")
+st.title("🏃‍♂️ 跑者硬核路书：越野跑赛道智能分析预测器 (山峰保真与山峦面积图版)")
+st.markdown("本版本彻底重构了底层滤波，**废除了会削平山峰的宏观趋势平滑**，采用 100 米区间重采样机制与相邻同性质坡度合并算法，完美保留真实海拔高度。")
 st.markdown("---")
 
 # --- 2. 核心数学与地理工具函数 ---
@@ -36,14 +36,20 @@ def classify_slope(slope):
     else: return '极陡下坡'
 
 SLOPE_ORDER = ['极陡坡', '陡坡', '缓坡', '平地', '缓下坡', '陡下坡', '极陡下坡']
+# 调高了颜色饱和度和透明度配合面积填充
 COLOR_MAP = {
-    '极陡坡': '#8B0000', '陡坡': '#FF4500', '缓坡': '#FFD700',
-    '平地': '#228B22', '缓下坡': '#00FFFF', '陡下坡': '#1E90FF', '极陡下坡': '#00008B'
+    '极陡坡': 'rgba(139, 0, 0, 0.75)',    # 深红
+    '陡坡': 'rgba(255, 69, 0, 0.75)',     # 橙红
+    '缓坡': 'rgba(255, 215, 0, 0.75)',     # 金黄
+    '平地': 'rgba(34, 139, 34, 0.75)',     # 森林绿
+    '缓下坡': 'rgba(0, 206, 209, 0.75)',   # 闪绿
+    '陡下坡': 'rgba(30, 144, 255, 0.75)',   # 道奇蓝
+    '极陡下坡': 'rgba(0, 0, 139, 0.75)'     # 深蓝
 }
 
-# --- 3. 终极算法层：残差积分 GPX 处理器 ---
+# --- 3. 全新重构算法层：百米重采样与山峰保真处理器 ---
 @st.cache_data
-def process_gpx_hardcore(file, min_sampling_dist, vertical_threshold, gain_coef):
+def process_gpx_hardcore(file, segment_size_m, vertical_threshold, gain_coef):
     try:
         tree = ET.parse(file)
         root = tree.getroot()
@@ -53,15 +59,8 @@ def process_gpx_hardcore(file, min_sampling_dist, vertical_threshold, gain_coef)
 
     raw_points = []
     nodes = root.findall('.//{*}trkpt')
-    point_type = "标准轨迹点 (trkpt)"
-    
-    if not nodes:
-        nodes = root.findall('.//{*}rtept')
-        point_type = "规划航线点 (rtept)"
-        
-    if not nodes:
-        nodes = root.findall('.//{*}wpt')
-        point_type = "独立位置点 (wpt)"
+    if not nodes: nodes = root.findall('.//{*}rtept')
+    if not nodes: nodes = root.findall('.//{*}wpt')
         
     for pt in nodes:
         lat = float(pt.get('lat'))
@@ -73,86 +72,75 @@ def process_gpx_hardcore(file, min_sampling_dist, vertical_threshold, gain_coef)
     if len(raw_points) == 0:
         st.error("❌ 深度扫描失败：文件中未包含有效的坐标坐标！")
         return None, []
-    
-    st.toast(f"ℹ️ 成功通过 【{point_type}】 模式提取了 {len(raw_points)} 个地理坐标！")
 
-    # 🚀 空间抽稀滤波
-    filtered_points = [raw_points[0]]
-    for i in range(1, len(raw_points)):
-        last_pt = filtered_points[-1]
-        curr_pt = raw_points[i]
-        d = haversine(last_pt['lon'], last_pt['lat'], curr_pt['lon'], curr_pt['lat'])
-        if d >= min_sampling_dist or i == len(raw_points) - 1:
-            filtered_points.append(curr_pt)
-            
-    df = pd.DataFrame(filtered_points)
+    # 1. 建立累积原始距离（无损保留山峰最高点）
+    raw_df = pd.DataFrame(raw_points)
+    raw_df['dist_diff'] = 0.0
+    for i in range(1, len(raw_df)):
+        raw_df.loc[i, 'dist_diff'] = haversine(raw_df.loc[i-1, 'lon'], raw_df.loc[i-1, 'lat'], raw_df.loc[i, 'lon'], raw_df.loc[i, 'lat'])
+    raw_df['cum_dist_m'] = raw_df['dist_diff'].cumsum()
     
-    df['dist_diff'] = 0.0
-    for i in range(1, len(df)):
-        df.loc[i, 'dist_diff'] = haversine(df.loc[i-1, 'lon'], df.loc[i-1, 'lat'], df.loc[i, 'lon'], df.loc[i, 'lat'])
-    df['cum_dist_km'] = df['dist_diff'].cumsum() / 1000.0
-
-    # 🛑 【残差蓄水池积分算法】
-    ele_raw = df['ele'].values
-    dist_diff = df['dist_diff'].values
-    n_points = len(ele_raw)
+    total_len_m = raw_df['cum_dist_m'].iloc[-1]
     
-    # 扩大整体趋势窗口至 11 点，用来更稳定地捕获越野跑的宏观地形起伏趋势
-    df_temp = pd.DataFrame({'ele': ele_raw})
-    ele_trend = df_temp['ele'].rolling(window=11, min_periods=1, center=True).mean().values
+    # 2. 100米区间锚定重采样机制（确保区间端点准确捕捉到区域内的极值）
+    grid_points = []
+    current_target = 0.0
     
-    ele_diff_clean = np.zeros(n_points)
-    MAX_PHYSICAL_SLOPE = 60.0 
-    
-    # 爬升与下降残差蓄水池
-    residual_ascent = 0.0
-    residual_descent = 0.0
-    
-    for i in range(1, n_points):
-        h_diff_raw = ele_raw[i] - ele_raw[i-1]
-        h_diff_trend = ele_trend[i] - ele_trend[i-1]
-        d_diff = dist_diff[i]
+    while current_target <= total_len_m:
+        # 寻找最接近当前网格点的原始GPS点
+        idx = (raw_df['cum_dist_m'] - current_target).abs().idxmin()
+        matched_row = raw_df.loc[idx]
         
-        # 物理异常卡口
-        instant_slope = (abs(h_diff_raw) / d_diff * 100) if d_diff > 0 else 0
-        if instant_slope > MAX_PHYSICAL_SLOPE:
-            continue
-            
-        # 1. 显著变化，直接无损计入
-        if abs(h_diff_raw) >= vertical_threshold:
-            ele_diff_clean[i] = h_diff_raw * gain_coef
+        # 【山峰保真窗口】在当前100米范围内扫描原始数据的最大值，防止最高海拔被稀释
+        local_window = raw_df[(raw_df['cum_dist_m'] >= current_target - segment_size_m/2) & 
+                              (raw_df['cum_dist_m'] <= current_target + segment_size_m/2)]
+        
+        ele_value = matched_row['ele']
+        if not local_window.empty:
+            # 如果附近有显著的高峰，优先锁死高峰海拔
+            local_max = local_window['ele'].max()
+            if local_max - ele_value > 5.0: 
+                ele_value = local_max
+
+        grid_points.append({
+            'cum_dist_m': current_target,
+            'lat': matched_row['lat'],
+            'lon': matched_row['lon'],
+            'ele_raw': ele_value
+        })
+        current_target += segment_size_m
+
+    df_grid = pd.DataFrame(grid_points)
+    n_grid = len(df_grid)
+    
+    # 3. 区间爬升计算与相邻性质合并
+    df_grid['dist_diff'] = segment_size_m
+    df_grid.loc[0, 'dist_diff'] = 0.0
+    df_grid['cum_dist_km'] = df_grid['cum_dist_m'] / 1000.0
+    
+    ele_filtered = np.zeros(n_grid)
+    ele_diff_clean = np.zeros(n_grid)
+    ele_filtered[0] = df_grid['ele_raw'].iloc[0]
+    
+    for i in range(1, n_grid):
+        h_diff = df_grid['ele_raw'].iloc[i] - df_grid['ele_raw'].iloc[i-1]
+        
+        # 阈值过滤卡口，但对保留下来的高度叠加放大系数
+        if abs(h_diff) >= vertical_threshold:
+            ele_diff_clean[i] = h_diff * gain_coef
         else:
-            # 2. 微小变化，如果与大趋势同向，塞进蓄水池，拒绝被设备平滑抹杀
-            if h_diff_raw * h_diff_trend >= 0:
-                if h_diff_raw > 0:
-                    residual_ascent += h_diff_raw
-                    # 蓄水池能量满溢或趋势确认时释放
-                    if residual_ascent >= 0.5:
-                        ele_diff_clean[i] = residual_ascent * gain_coef
-                        residual_ascent = 0.0
-                elif h_diff_raw < 0:
-                    residual_descent += h_diff_raw
-                    if abs(residual_descent) >= 0.5:
-                        ele_diff_clean[i] = residual_descent * gain_coef
-                        residual_descent = 0.0
-            else:
-                # 3. 彻底的方向背离噪声，丢弃
-                pass
-
-    ele_clean_path = np.zeros(n_points)
-    ele_clean_path[0] = ele_raw[0]
-    for i in range(1, n_points):
-        ele_clean_path[i] = ele_clean_path[i-1] + ele_diff_clean[i]
+            ele_diff_clean[i] = 0.0
+            
+        ele_filtered[i] = ele_filtered[i-1] + ele_diff_clean[i]
         
-    df['ele_filtered'] = ele_clean_path
-    df['ele_diff_clean'] = ele_diff_clean
+    df_grid['ele_filtered'] = ele_filtered
+    df_grid['ele_diff_clean'] = ele_diff_clean
     
-    # 坡度平滑
-    df['slope_raw'] = np.where(df['dist_diff'] > 0, (df['ele_diff_clean'] / df['dist_diff']) * 100, 0)
-    df['slope_aligned'] = df['slope_raw'].rolling(window=5, min_periods=1, center=True).mean()
-    df['slope_class'] = df['slope_aligned'].apply(classify_slope)
+    # 计算百米均线坡度并分类
+    df_grid['slope_aligned'] = np.where(df_grid['dist_diff'] > 0, (df_grid['ele_diff_clean'] / df_grid['dist_diff']) * 100, 0)
+    df_grid['slope_class'] = df_grid['slope_aligned'].apply(classify_slope)
 
-    # 航点提取逻辑
+    # 4. 提取航点（CP点）
     detected_waypoints = []
     for wpt in root.findall('.//{*}wpt'):
         name_node = wpt.find('.//{*}name')
@@ -165,16 +153,16 @@ def process_gpx_hardcore(file, min_sampling_dist, vertical_threshold, gain_coef)
             
         min_dist = float('inf')
         matched_km = 0.0
-        for i in range(len(df)):
-            d = haversine(wpt_lon, wpt_lat, df.loc[i, 'lon'], df.loc[i, 'lat'])
+        for i in range(len(df_grid)):
+            d = haversine(wpt_lon, wpt_lat, df_grid.loc[i, 'lon'], df_grid.loc[i, 'lat'])
             if d < min_dist:
                 min_dist = d
-                matched_km = df.loc[i, 'cum_dist_km']
-        if min_dist < 500: 
+                matched_km = df_grid.loc[i, 'cum_dist_km']
+        if min_dist < 600: 
             detected_waypoints.append({"name": wpt_name, "km": round(matched_km, 2)})
             
     detected_waypoints = sorted(detected_waypoints, key=lambda x: x['km'])
-    return df, detected_waypoints
+    return df_grid, detected_waypoints
 
 # --- 4. 侧边栏交互配置区 ---
 st.sidebar.header("⏱️ 1. 基础运动配速 (min/km)")
@@ -197,19 +185,18 @@ st.sidebar.header("📍 3. 备用手动 CP 点")
 cp_backup_input = st.sidebar.text_input("备用手动分段公里数（逗号隔开）", value="15, 30, 45")
 
 st.sidebar.markdown("---")
-st.sidebar.header("🛡️ 4. 降噪与爬升对齐核心调参")
-user_sampling_dist = st.sidebar.slider("空间抽稀采样步长 (米)", min_value=1, max_value=30, value=1, step=1)
-user_vertical_threshold = st.sidebar.slider("垂直过滤门限 (米)", min_value=0.0, max_value=5.0, value=0.2, step=0.1)
-
-# 🔥 核心新增：新增硬件补偿系数滑块，专门应对手机/手表底层的预抹平
-user_gain_coef = st.sidebar.slider("📊 手机实测硬件爬升增益补偿 (1.0=原值)", min_value=1.0, max_value=1.3, value=1.18, step=0.01)
+st.sidebar.header("🛡️ 4. 降噪与重采样精算调参")
+# 锁定或者开放最小分析分段，默认满足用户提出的 100 米硬指标
+user_segment_size = st.sidebar.slider("📐 最小爬升核算分段步长 (米)", min_value=50, max_value=500, value=100, step=50)
+user_vertical_threshold = st.sidebar.slider("垂直过滤噪声门限 (米)", min_value=0.0, max_value=3.0, value=0.0, step=0.1)
+user_gain_coef = st.sidebar.slider("📊 全局高程放大增益系数", min_value=1.0, max_value=1.4, value=1.08, step=0.01)
 
 # --- 5. 主页面业务流 ---
 uploaded_file = st.file_uploader("第一步：上传官方赛道或手表导出的 GPX 文件", type=["gpx"])
 
 if uploaded_file:
     uploaded_file.seek(0)
-    df, gpx_wpts = process_gpx_hardcore(uploaded_file, user_sampling_dist, user_vertical_threshold, user_gain_coef)
+    df, gpx_wpts = process_gpx_hardcore(uploaded_file, user_segment_size, user_vertical_threshold, user_gain_coef)
     
     if df is not None:
         total_dist = float(df['dist_diff'].sum() / 1000.0)
@@ -224,8 +211,8 @@ if uploaded_file:
         # --- 仪表盘看板 ---
         m_col1, m_col2, m_col3, m_col4 = st.columns(4)
         m_col1.metric("📐 赛道总里程", f"{total_dist:.2f} km")
-        m_col2.metric("🔺 全局独立总爬升", f"{total_ascent:.0f} m")
-        m_col3.metric("🔻 全局独立总下降", f"{total_descent:.0f} m")
+        m_col2.metric("🔺 山峰保真总爬升", f"{total_ascent:.0f} m")
+        m_col3.metric("🔻 山峰保真总下降", f"{total_descent:.0f} m")
         hours, mins = divmod(int(total_time_min), 60)
         m_col4.metric("⏱️ 智能预测总用时", f"{hours}小时 {mins}分钟")
 
@@ -259,23 +246,62 @@ if uploaded_file:
 
         df['cp_seg'] = pd.cut(df['cum_dist_km'], bins=break_points, labels=seg_labels, include_lowest=True)
 
-        # --- 海拔剖面图 ---
-        st.subheader("🌋 空间对齐·精细化赛道地形剖面图")
+        # --- 6. 全新视觉层：相邻坡度区间合并 + 山峦线下区域面积填充图 ---
+        st.subheader("🌋 100米级同质坡度合并 · 山峦面积填充图")
         fig = go.Figure()
+
+        # 算法逻辑：遍历数据，将相邻且 slope_class 相同的网格区间合并成连续的连续色块进行 Area 填充
+        i = 0
+        n_points = len(df)
+        while i < n_points - 1:
+            current_class = df.loc[i, 'slope_class']
+            start_idx = i
+            
+            # 向后扫描直到坡度类型发生改变
+            while i < n_points - 1 and df.loc[i+1, 'slope_class'] == current_class:
+                i += 1
+            end_idx = min(i + 1, n_points - 1) # 包含边界点使色块无缝拼接
+            
+            # 提取该同质区间的片段数据
+            seg_chunk = df.loc[start_idx:end_idx]
+            
+            # 使用 fill='tozeroy' 渲染线下区域颜色
+            fig.add_trace(go.Scatter(
+                x=seg_chunk['cum_dist_km'], 
+                y=seg_chunk['ele_filtered'],
+                mode='lines',
+                line=dict(width=0.5, color='rgba(0,0,0,0)'), # 隐藏线条边缘，完全靠面积展现
+                fill='tozeroy',
+                fillcolor=COLOR_MAP.get(current_class, 'rgba(128,128,128,0.5)'),
+                name=current_class,
+                legendgroup=current_class,
+                showlegend=False, # 防止图例被无数的分段碎块塞满
+                hoverinfo='text',
+                text=[f"里程: {d:.2f}km<br>海拔: {e:.0f}m<br>类型: {c}({s:.1f}%)" 
+                      for d, e, c, s in zip(seg_chunk['cum_dist_km'], seg_chunk['ele_filtered'], seg_chunk['slope_class'], seg_chunk['slope_aligned'])]
+            ))
+            i += 1
+
+        # 单独为右侧图例添加 7 个虚拟样式占位，防止图例因合并算法失效
         for cat in SLOPE_ORDER:
-            if cat in COLOR_MAP:
-                cat_df = df.copy()
-                cat_df.loc[df['slope_class'] != cat, 'ele_filtered'] = None
-                fig.add_trace(go.Scatter(
-                    x=cat_df['cum_dist_km'], y=cat_df['ele_filtered'],
-                    mode='lines', line=dict(color=COLOR_MAP[cat], width=3.5),
-                    name=cat, hoverinfo='text',
-                    text=[f"里程: {d:.2f}km<br>海拔: {e:.0f}m<br>坡度: {s:.1f}%" 
-                          for d, e, s in zip(df['cum_dist_km'], df['ele_filtered'], df['slope_aligned'])]
-                ))
+            fig.add_trace(go.Scatter(
+                x=[None], y=[None], mode='markers',
+                marker=dict(size=10, color=COLOR_MAP[cat], symbol='square'),
+                name=cat
+            ))
+
+        # 垂直切分线（CP分段点）
         for bp in break_points[1:-1]:
-            fig.add_vline(x=bp, line_width=1.5, line_dash="dash", line_color="#8C8C8C")
-        fig.update_layout(xaxis_title="距离里程 (km)", yaxis_title="海拔高度 (m)", legend_title="地形分类", hovermode="x unified", template="plotly_white", height=500)
+            fig.add_vline(x=bp, line_width=1.5, line_dash="dash", line_color="#4F4F4F")
+
+        fig.update_layout(
+            xaxis_title="距离里程 (km)", 
+            yaxis_title="海拔高度 (m)", 
+            legend_title="地形坡度分类", 
+            hovermode="x unified", 
+            template="plotly_white", 
+            height=550
+        )
         st.plotly_chart(fig, use_container_width=True)
 
         # --- 赛事分段战术计划表 ---
@@ -303,7 +329,7 @@ if uploaded_file:
                     "段内里程 (km)": f"{seg_dist:.2f}",
                     "本段爬升 (m)": f"+{seg_ascent:.0f}",
                     "本段下降 (m)": f"-{seg_descent:.0f}",
-                    "本段预估耗时": f"{s_h}小时 {s_m} minutes",
+                    "本段预估耗时": f"{s_h}小时 {s_m}分钟",
                     "累计比赛时间": f"⏱️ {c_h:02d}:{c_m:02d}"
                 })
         st.dataframe(pd.DataFrame(cp_stats), use_container_width=True, hide_index=True)
