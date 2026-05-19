@@ -13,10 +13,7 @@ st.set_page_config(
 )
 
 st.title("🏃‍♂️ 跑者硬核路书：越野跑赛道智能分析预测器 (全局独立精算版)")
-st.markdown("""
-本程序采用 **全局总指标独立核算机制**，彻底剥离了分段切片对大盘总爬升的影响。
-无论手机/手表实测轨迹还是航点如何错位，均能保障全局总爬升的绝对精准。
-""")
+st.markdown("本程序采用 **全局总指标独立核算机制**，彻底剥离了分段切片对大盘总爬升的影响。无论手机/手表实测轨迹还是航点如何错位，均能保障全局总爬升的绝对精准。")
 st.markdown("---")
 
 # --- 2. 核心数学与地理工具函数 ---
@@ -95,46 +92,50 @@ def process_gpx_hardcore(file, min_sampling_dist, vertical_threshold):
         df.loc[i, 'dist_diff'] = haversine(df.loc[i-1, 'lon'], df.loc[i-1, 'lat'], df.loc[i, 'lon'], df.loc[i, 'lat'])
     df['cum_dist_km'] = df['dist_diff'].cumsum() / 1000.0
 
-    # 🛑 自适应台阶方向累加过滤算法
+    # 🛑 【无损趋势捕捉算法】
     ele_raw = df['ele'].values
     dist_diff = df['dist_diff'].values
-    ele_clean = np.copy(ele_raw)
+    n_points = len(ele_raw)
     
-    MAX_PHYSICAL_SLOPE = 65.0 
-    last_valid_ele = ele_raw[0]
-    accumulated_h_diff = 0.0 
+    df_temp = pd.DataFrame({'ele': ele_raw})
+    ele_trend = df_temp['ele'].rolling(window=7, min_periods=1, center=True).mean().values
     
-    for i in range(1, len(ele_raw)):
-        h_diff = ele_raw[i] - last_valid_ele
+    ele_diff_clean = np.zeros(n_points)
+    MAX_PHYSICAL_SLOPE = 60.0 
+    
+    for i in range(1, n_points):
+        h_diff_raw = ele_raw[i] - ele_raw[i-1]
+        h_diff_trend = ele_trend[i] - ele_trend[i-1]
         d_diff = dist_diff[i]
         
-        instant_slope = (abs(h_diff) / d_diff * 100) if d_diff > 0 else 0
+        # 物理异常卡口
+        instant_slope = (abs(h_diff_raw) / d_diff * 100) if d_diff > 0 else 0
         if instant_slope > MAX_PHYSICAL_SLOPE:
-            ele_clean[i] = last_valid_ele
+            ele_diff_clean[i] = 0.0
             continue
             
-        if abs(h_diff) >= vertical_threshold:
-            last_valid_ele = ele_raw[i]
-            ele_clean[i] = ele_raw[i]
-            accumulated_h_diff = 0.0 
+        if abs(h_diff_raw) >= vertical_threshold:
+            ele_diff_clean[i] = h_diff_raw
         else:
-            accumulated_h_diff += h_diff
-            if abs(accumulated_h_diff) >= vertical_threshold:
-                last_valid_ele = ele_raw[i]
-                ele_clean[i] = ele_raw[i]
-                accumulated_h_diff = 0.0
+            if h_diff_raw * h_diff_trend > 0:
+                ele_diff_clean[i] = h_diff_raw
             else:
-                ele_clean[i] = last_valid_ele
+                ele_diff_clean[i] = 0.0
 
-    df['ele_filtered'] = ele_clean
-    df['ele_diff_clean'] = df['ele_filtered'].diff().fillna(0)
+    ele_clean_path = np.zeros(n_points)
+    ele_clean_path[0] = ele_raw[0]
+    for i in range(1, n_points):
+        ele_clean_path[i] = ele_clean_path[i-1] + ele_diff_clean[i]
+        
+    df['ele_filtered'] = ele_clean_path
+    df['ele_diff_clean'] = ele_diff_clean
     
     # 坡度平滑
     df['slope_raw'] = np.where(df['dist_diff'] > 0, (df['ele_diff_clean'] / df['dist_diff']) * 100, 0)
     df['slope_aligned'] = df['slope_raw'].rolling(window=5, min_periods=1, center=True).mean()
     df['slope_class'] = df['slope_aligned'].apply(classify_slope)
 
-    # 航点提取逻辑（修正拼写错误并加入类型防御）
+    # 航点提取逻辑
     detected_waypoints = []
     for wpt in root.findall('.//{*}wpt'):
         name_node = wpt.find('.//{*}name')
@@ -180,8 +181,8 @@ cp_backup_input = st.sidebar.text_input("备用手动分段公里数（逗号隔
 
 st.sidebar.markdown("---")
 st.sidebar.header("🛡️ 4. 降噪与爬升对齐核心调参")
-user_sampling_dist = st.sidebar.slider("空间抽稀采样步长 (米)", min_value=1, max_value=30, value=2, step=1)
-user_vertical_threshold = st.sidebar.slider("垂直过滤门限 (米)", min_value=0.1, max_value=5.0, value=0.5, step=0.1)
+user_sampling_dist = st.sidebar.slider("空间抽稀采样步长 (米)", min_value=1, max_value=30, value=1, step=1)
+user_vertical_threshold = st.sidebar.slider("垂直过滤门限 (米)", min_value=0.0, max_value=5.0, value=0.1, step=0.1)
 
 # --- 5. 主页面业务流 ---
 uploaded_file = st.file_uploader("第一步：上传官方赛道或手表导出的 GPX 文件", type=["gpx"])
@@ -191,12 +192,10 @@ if uploaded_file:
     df, gpx_wpts = process_gpx_hardcore(uploaded_file, user_sampling_dist, user_vertical_threshold)
     
     if df is not None:
-        # 🛑 【核心修正】：全局指标一锅出，完全不受任何后续分段切片逻辑的干扰！
         total_dist = float(df['dist_diff'].sum() / 1000.0)
         total_ascent = float(df[df['ele_diff_clean'] > 0]['ele_diff_clean'].sum())
         total_descent = float(abs(df[df['ele_diff_clean'] < 0]['ele_diff_clean'].sum()))
         
-        # 基础耗时重算
         df['fatigue_factor'] = 1.0 + (df['cum_dist_km'] // 10) * fatigue_rate
         df['pred_pace'] = df.apply(lambda row: paces.get(row['slope_class'], 6.0) * row['fatigue_factor'], axis=1)
         df['time_spent_min'] = (df['dist_diff'] / 1000.0) * df['pred_pace']
@@ -238,7 +237,6 @@ if uploaded_file:
                 elif i == len(break_points)-2: seg_labels.append(f"CP{i} ➔ 终点")
                 else: seg_labels.append(f"CP{i} ➔ CP{i+1}")
 
-        # 使用对边界更有耐受力的分段方式
         df['cp_seg'] = pd.cut(df['cum_dist_km'], bins=break_points, labels=seg_labels, include_lowest=True)
 
         # --- 海拔剖面图 ---
