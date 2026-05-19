@@ -195,13 +195,13 @@ st.sidebar.markdown("""
 
 user_sampling_dist = st.sidebar.slider(
     "空间抽稀采样步长 (米)", 
-    min_value=1, max_value=30, value=5, step=1,
+    min_value=0.5, max_value=30, value=5, step=0.5,
     help="每隔多少米强制提取一个点。原轨迹过瘦时调小，过胖毛刺多时调大。"
 )
 
 user_vertical_threshold = st.sidebar.slider(
     "垂直过滤门限 (米)", 
-    min_value=0.5, max_value=5.0, value=1.5, step=0.1,
+    min_value=0.1, max_value=1.0, value=0.2, step=0.05,
     help="只有当垂直海拔高度变化超过该值时，才记录为有效爬升。用于过滤原地高度微漂移。"
 )
 
