@@ -11,24 +11,13 @@ import base64
 
 # --- 1. 页面基本配置 ---
 st.set_page_config(
-    page_title="越野跑赛道智能分析预测器 v10", 
+    page_title="越野跑赛道智能分析预测器 v12", 
     layout="wide", 
     initial_sidebar_state="expanded"
 )
 
-# 注入 CSS 样式：优化大表与打印卡片的视觉体验
-st.markdown("""
-<style>
-    .tactical-table { width: 100%; border-collapse: collapse; font-family: sans-serif; margin: 15px 0; font-size: 14px; }
-    .tactical-table th { background-color: #1e1e1e; color: white; padding: 10px; text-align: center; }
-    .tactical-table td { padding: 8px; border-bottom: 1px solid #ddd; text-align: center; vertical-align: middle; }
-    .tactical-table tr:hover { background-color: #f5f5f5; }
-    .sparkline-img { display: block; margin: 0 auto; max-height: 45px; width: auto; }
-</style>
-""", unsafe_allow_html=True)
-
-st.title("🏃‍♂️ 跑者硬核路书：越野跑赛道智能分析预测器 (图表融合版)")
-st.markdown("进化说明：基础精细核算步长级差精细至 10 米；攻克技术壁垒，将地形大趋势线**切碎为各区间独立微型图**无缝嵌入战术大表。")
+st.title("🏃‍♂️ 跑者硬核路书：越野跑赛道智能分析预测器 (全景+战术融合版)")
+st.markdown("进化说明：**完美保留前序版本全局大趋势图**，并在此基础上附加各区间独立微型地形切片图嵌入战术表格与手腕卡片。")
 st.markdown("---")
 
 # --- 2. 工具函数：配速时间格式转换与数学核算 ---
@@ -68,38 +57,31 @@ def format_time_duration(minutes_float):
     mins = int(minutes_float % 60)
     return f"{hours}h {mins:02d}m"
 
-# 核心渲染颜色
+# 坡度分类颜色映射
 COLOR_MAP = {
     '极陡坡': '#8B0000', '陡坡': '#FF4500', '缓坡': '#FFD700', '平地': '#228B22',
     '缓下坡': '#00CED1', '陡下坡': '#1E94FF', '极陡下坡': '#00008B'
 }
 
-# 后台自动化微型图生成器 (Sparkline)
+# 后台微型地形图生成器 (Sparkline)
 def generate_sparkline_base64(seg_df, global_min_ele, global_max_ele):
     if len(seg_df) < 2:
         return ""
     
-    # 强制独立后台画图，防止线程污染
-    fig, ax = plt.subplots(figsize=(3, 0.6), dpi=100)
-    
+    fig, ax = plt.subplots(figsize=(3, 0.6), dpi=120)
     x = seg_df['cum_dist_km'].values
     y = seg_df['ele_filtered'].values
     
-    # 绘制基础地形线
-    ax.plot(x, y, color='#333333', linewidth=1.5)
-    # 区域填充阴影
-    ax.fill_between(x, y, global_min_ele, color='#e0e0e0', alpha=0.6)
+    ax.plot(x, y, color='#222222', linewidth=1.8)
+    ax.fill_between(x, y, global_min_ele, color='#e5e5e5', alpha=0.7)
     
-    # 局部极值标记
-    ax.plot(x[0], y[0], 'go', markersize=3) # 分段起点
-    ax.plot(x[-1], y[-1], 'ro', markersize=3) # 分段终点
+    ax.plot(x[0], y[0], 'go', markersize=3.5) 
+    ax.plot(x[-1], y[-1], 'ro', markersize=3.5) 
     
-    # 严格限缩画布边界
     ax.set_ylim(global_min_ele - 20, global_max_ele + 20)
     ax.axis('off')
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
     
-    # 内存流转 Base64 字符串
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, transparent=True)
     buf.seek(0)
@@ -107,7 +89,7 @@ def generate_sparkline_base64(seg_df, global_min_ele, global_max_ele):
     plt.close(fig)
     return f"data:image/png;base64,{img_base64}"
 
-# --- 3. 算法层：百米重采样与山峰保真处理器 ---
+# --- 3. 算法层：网格化重采样处理器 ---
 @st.cache_data
 def process_gpx_hardcore(file, segment_size_m, vertical_threshold):
     try:
@@ -193,7 +175,7 @@ def process_gpx_hardcore(file, segment_size_m, vertical_threshold):
             
     return df_grid, sorted(detected_waypoints, key=lambda x: x['km'])
 
-# --- 4. 侧边栏交互配置区 ---
+# --- 4. 侧边栏配置区 ---
 st.sidebar.header("⏱️ 1. 运动配速设定 (分:秒)")
 raw_input_paces = {
     '极陡坡': st.sidebar.text_input("极陡坡 (>15%)", value="25:00"),
@@ -218,8 +200,6 @@ cp_backup_input = st.sidebar.text_input("备用手动分段公里数（逗号隔
 st.sidebar.markdown("---")
 st.sidebar.header("🎨 4. 高级算法调参")
 user_visual_window = st.sidebar.slider("🌍 图像坡度趋势平滑窗口 (米)", min_value=200, max_value=5000, value=2000, step=200)
-
-# 需求优化一：核算步长调节精度改小，级差调精细到 10
 user_segment_size = st.sidebar.slider("📐 基础精细核算步长 (米)", min_value=10, max_value=200, value=50, step=10)
 user_vertical_threshold = st.sidebar.slider("垂直噪声过滤门限 (米)", min_value=0.0, max_value=3.0, value=0.0, step=0.1)
 
@@ -235,17 +215,17 @@ if uploaded_file:
         total_ascent = float(df[df['ele_diff_clean'] > 0]['ele_diff_clean'].sum())
         total_descent = float(abs(df[df['ele_diff_clean'] < 0]['ele_diff_clean'].sum()))
         
+        # 融入衰减和时钟轴核算
         df['fatigue_factor'] = 1.0 + (df['cum_dist_km'] // 10) * fatigue_rate
         df['pred_pace'] = df.apply(lambda row: paces.get(row['slope_class'], 6.0) * row['fatigue_factor'], axis=1)
         df['time_spent_min'] = (df['dist_diff'] / 1000.0) * df['pred_pace']
         df['cum_time_min'] = df['time_spent_min'].cumsum()
         total_time_min = float(df['time_spent_min'].sum())
 
-        # 用于微型图归一化的全局最高最低海拔
         global_min_ele = df['ele_filtered'].min()
         global_max_ele = df['ele_filtered'].max()
 
-        # 仪表盘
+        # 核心仪表盘看板
         m_col1, m_col2, m_col3, m_col4 = st.columns(4)
         m_col1.metric("📐 赛道总里程", f"{total_dist:.2f} km")
         m_col2.metric("🔺 真实原生总爬升", f"{total_ascent:.0f} m")
@@ -253,7 +233,7 @@ if uploaded_file:
         hours, mins = divmod(int(total_time_min), 60)
         m_col4.metric("⏱️ 智能预测总用时", f"{hours}小时 {mins}分钟")
 
-        # 划分 CP 区间边界
+        # 动态解析分段锚点
         valid_wpts = []
         if len(gpx_wpts) > 0:
             for w in gpx_wpts:
@@ -271,12 +251,71 @@ if uploaded_file:
         seg_labels = [f"{node_names[i]} ➔ {node_names[i+1]}" for i in range(len(break_points)-1)]
         df['cp_seg'] = pd.cut(df['cum_dist_km'], bins=break_points, labels=seg_labels, include_lowest=True)
 
-        # 数据重组与独立微型趋势图核算
-        plot_segments = []
+        # =========================================================================
+        # 🔥【前序版本功能回归】：绘制全局大趋势全景图（Plotly 交互式大图）
+        # =========================================================================
+        st.markdown("---")
+        st.subheader("📊 赛道全局宏观地形大趋势图 (彩色时钟时序全景轴)")
+        st.markdown("移动鼠标可实时捕获赛道任意一点的**累计里程、实时海拔、精细坡度分类**及**预测到达的绝对时钟时间**。")
+        
+        # 为大图计算时间悬停
         base_start_datetime = datetime.datetime.combine(datetime.date.today(), start_time)
+        df['hover_time_str'] = df['cum_time_min'].apply(lambda m: (base_start_datetime + datetime.timedelta(minutes=m)).strftime("%H:%M"))
+        
+        # 坡度平滑窗口计算（用于大图可视化渲染，不破坏底层10米步长的精细数据）
+        window_size_points = max(2, int(user_visual_window / user_segment_size))
+        df['slope_smoothed'] = df['slope_aligned'].rolling(window=window_size_points, center=True, min_periods=1).mean()
+        df['visual_slope_class'] = df['slope_smoothed'].apply(classify_slope)
 
-        # 进度条提示，因为后台切碎画图需要少量计算
-        with st.spinner("正在切分赛段地形大趋势，无缝注入战术表格中..."):
+        fig_global = go.Figure()
+ # 分色彩条渲染全局大图
+        for s_class, group in df.groupby('visual_slope_class'):
+            fig_global.add_trace(go.Scatter(
+                x=group['cum_dist_km'],
+                y=group['ele_filtered'],
+                mode='markers+lines',
+                marker=dict(size=2, color=COLOR_MAP.get(s_class, '#777')),
+                line=dict(color=COLOR_MAP.get(s_class, '#777'), width=1.5),
+                name=s_class,
+                customdata=np.stack((group['slope_aligned'], group['hover_time_str']), axis=-1),
+                hovertemplate="<b>里程:</b> %{x:.2f} km<br><b>海拔:</b> %{y:.0f} m<br><b>精细坡度:</b> %{customdata[0]:.1f}%<br><b>🕒 预估到达:</b> %{customdata[1]}<extra></extra>"
+            ))
+
+        # 覆盖 CP 垂直分割参考线与标记
+        for wpt in valid_wpts:
+            # 找到CP点附近的实际海拔作为打点垂直高度
+            matched_idx = (df['cum_dist_km'] - wpt['km']).abs().idxmin()
+            wpt_ele = df.loc[matched_idx, 'ele_filtered']
+            wpt_time = df.loc[matched_idx, 'hover_time_str']
+            
+            # 垂直虚线
+            fig_global.add_vline(x=wpt['km'], line_width=1, line_dash="dash", line_color="#444")
+            # 地图打点
+            fig_global.add_trace(go.Scatter(
+                x=[wpt['km']], y=[wpt_ele],
+                mode="markers+text",
+                marker=dict(color="black", size=8, symbol="diamond"),
+                text=[f"📍 {wpt['name']}<br>{wpt['km']}k ({wpt_time})"],
+                textposition="top center",
+                showlegend=False
+            ))
+
+        fig_global.update_layout(
+            hovermode="x unified",
+            xaxis=dict(title="累计里程 (km)", showgrid=True, zeroline=False),
+            yaxis=dict(title="海拔高度 (m)", showgrid=True),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(l=40, r=40, t=30, b=40),
+            height=420
+        )
+        st.plotly_chart(fig_global, use_container_width=True)
+
+        # =========================================================================
+        # 📋【附加战术处理】：各CP段独立切碎微型图核算与一体化数据大表
+        # =========================================================================
+        plot_segments = []
+
+        with st.spinner("正在切分赛段地形微趋势，并无缝注入战术表格中..."):
             for idx, seg_name in enumerate(seg_labels):
                 seg_df = df[df['cp_seg'] == seg_name]
                 if len(seg_df) == 0: continue
@@ -290,7 +329,7 @@ if uploaded_file:
                 abs_arrival_dt = base_start_datetime + datetime.timedelta(minutes=end_cum_minutes)
                 abs_arrival_str = abs_arrival_dt.strftime("%H:%M")
                 
-                # 核心突破：独立切碎生成当前 CP 段的地形微型图
+                # 独立生成当前CP段的地形微型切片图（高归一化对照）
                 sparkline_b64 = generate_sparkline_base64(seg_df, global_min_ele, global_max_ele)
                 
                 plot_segments.append({
@@ -306,33 +345,15 @@ if uploaded_file:
                     'cum_time': end_cum_minutes,
                     'sparkline': sparkline_b64
                 })
-# --- 6. 【重大升级】：全功能一体化 HTML 动态战术大表 ---
+
         st.markdown("---")
         st.subheader("📋 赛事核心战术一体化超级大表 (独立趋势图融合版)")
-        st.markdown("系统已突破框架限制，成功将**「地形连续大趋势切片」**与**「绝对时间时钟轴」**完美融为一体。")
+        st.markdown("上方大趋势图掌控**全局战术策略**，下方拆解切片图监控**各赛段局部地形和时钟节奏**。")
 
-        # 拼装高级定制 HTML 表格
-        table_html = """
-        <table class="tactical-table">
-            <thead>
-                <tr>
-                    <th>序号</th>
-                    <th>赛段区间</th>
-                    <th>区间距离</th>
-                    <th>累计里程</th>
-                    <th>赛段爬升</th>
-                    <th>赛段下降</th>
-                    <th>赛段趋势地形切片</th>
-                    <th>预估耗时</th>
-                    <th>累计用时</th>
-                    <th>🎯 到达时间点</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        
+        # 拼装安全的独立 HTML 全功能大表页面
+        table_rows_html = ""
         for s in plot_segments:
-            table_html += f"""
+            table_rows_html += f"""
                 <tr>
                     <td><b>{s['id']}</b></td>
                     <td style="text-align:left; font-weight:500;">{s['name']}</td>
@@ -340,19 +361,52 @@ if uploaded_file:
                     <td>{s['node_km']:.2f} km</td>
                     <td style="color:#b30000; font-weight:600;">+{s['ascent']:.0f} m</td>
                     <td style="color:#004d99;">-{s['descent']:.0f} m</td>
-                    <!-- 动态注入的切碎独立小图 -->
-                    <td>< img class="sparkline-img" src="{s['sparkline']}" /></td>
+                    <!-- 附加要求：无缝切碎并嵌入表格的独立区间地形趋势线 -->
+                    <td>< img style="display:block; margin:0 auto; max-height:42px; width:auto;" src="{s['sparkline']}" /></td>
                     <td>{format_time_duration(s['time'])}</td>
                     <td>{format_time_duration(s['cum_time'])}</td>
                     <td style="background-color:#fff3cd; font-weight:bold; color:#856404;">⏰ {s['abs_arrival']}</td>
                 </tr>
             """
-        table_html += "</tbody></table>"
-        
-        # 渲染超级大表
-        st.markdown(table_html, unsafe_allow_html=True)
 
-        # 准备标准下载数据（不含网页图片的纯数据版 CSV 供用户备用）
+        complete_table_page = f"""
+        <html>
+        <head>
+            <style>
+                .t-table {{ width: 100%; border-collapse: collapse; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; color:#333; }}
+                .t-table th {{ background-color: #1a1a1a; color: white; padding: 12px 8px; text-align: center; font-weight: 600; }}
+                .t-table td {{ padding: 10px 8px; border-bottom: 1px solid #eeeeee; text-align: center; vertical-align: middle; }}
+                .t-table tr:hover {{ background-color: #f9f9f9; }}
+            </style>
+        </head>
+        <body style="margin:0; padding:0; background:transparent;">
+            <table class="t-table">
+                <thead>
+                    <tr>
+                        <th>序号</th>
+                        <th>赛段区间</th>
+                        <th>区间距离</th>
+                        <th>累计里程</th>
+                        <th>赛段爬升</th>
+                        <th>赛段下降</th>
+                        <th>赛段趋势地形切片</th>
+                        <th>预估耗时</th>
+                        <th>累计用时</th>
+                        <th>🎯 到达时间点</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {table_rows_html}
+                </tbody>
+            </table>
+        </body>
+        </html>
+        """
+        
+        calculated_table_height = 80 + len(plot_segments) * 62
+        st.components.v1.html(complete_table_page, height=max(calculated_table_height, 250), scrolling=False)
+
+        # 提供基础文本 CSV 下载
         raw_download_rows = []
         for s in plot_segments:
             raw_download_rows.append({
@@ -363,7 +417,7 @@ if uploaded_file:
         csv_buffer = pd.DataFrame(raw_download_rows).to_csv(index=False).encode('utf-8-sig')
         st.download_button(label="💾 下载该一体化战术表格数据 (CSV纯文本格式)", data=csv_buffer, file_name="Race_Tactical_Data.csv", mime="text/csv")
 
-        # --- 7. 便携式手腕路书贴纸卡片 (支持直接打印) ---
+        # --- 7. 便携式手腕路书贴纸卡片 (附加项：保留打印切片) ---
         st.markdown("---")
         st.subheader("🖨️ 选手专属便携式手腕路书贴纸 / 打印卡片")
         
@@ -371,43 +425,54 @@ if uploaded_file:
         for s in plot_segments:
             card_rows_html += f"""
             <tr>
-                <td style="font-weight:bold; border-bottom:1px solid #333; font-size:15px; padding:5px 2px;">{s['target_node']}</td>
-                <td style="border-bottom:1px solid #333;">{s['node_km']:.1f}k</td>
-                <td style="color:#b30000; font-weight:bold; border-bottom:1px solid #333;">+{s['ascent']:.0f}</td>
-                <td style="border-bottom:1px solid #333;">< img style="height:25px; width:auto;" src="{s['sparkline']}" /></td>
-                <td style="background-color:#e6e6e6; font-weight:black; font-size:16px; border-bottom:1px solid #333; text-align:center;">{s['abs_arrival']}</td>
+                <td style="font-weight:bold; border-bottom:1px solid #222; font-size:15px; padding:6px 2px; text-align:left;">{s['target_node']}</td>
+                <td style="border-bottom:1px solid #222;">{s['node_km']:.1f}k</td>
+                <td style="color:#b30000; font-weight:bold; border-bottom:1px solid #222;">+{s['ascent']:.0f}</td>
+                <td style="border-bottom:1px solid #222; padding:2px;">< img style="height:25px; width:auto; display:block; margin:0 auto;" src="{s['sparkline']}" /></td>
+                <td style="background-color:#e6e6e6; font-weight:900; font-size:16px; border-bottom:1px solid #222; text-align:center;">{s['abs_arrival']}</td>
             </tr>
             """
 
-        html_pacing_card = f"""
-        <div id="pacing-card-container" style="max-width: 380px; border: 3px solid #111; padding: 12px; background-color: #fff; color: #000; font-family: sans-serif;">
+        html_pacing_card_page = f"""
+        <html>
+        <head>
             <style>
                 @media print {{
                     body * {{ visibility: hidden; }}
-                    #pacing-card-container, #pacing-card-container * {{ visibility: visible; }}
-                    #pacing-card-container {{ position: absolute; left: 0; top: 0; width: 100%; border:2px solid #000; }}
+                    #card-root, #card-root * {{ visibility: visible; }}
+                    #card-root {{ position: absolute; left: 0; top: 0; width: 100%; border:2px solid #000; box-shadow:none; }}
                 }}
             </style>
-            <div style="text-align: center; border-bottom: 2px solid #111; padding-bottom: 5px; margin-bottom: 8px;">
-                <h3 style="margin: 0; font-size: 16px; letter-spacing:1px;">🏃‍♂️ 实战强视导向防盲路书</h3>
-                <span style="font-size: 11px; color: #555;">起跑时间：{start_time.strftime("%H:%M")} | 基础核算步长：{user_segment_size}米</span>
+        </head>
+        <body style="margin:0; padding:10px; background:transparent;">
+            <div id="card-root" style="max-width: 360px; border: 3px solid #111; padding: 12px; background-color: #fff; color: #000; font-family: sans-serif; box-shadow: 4px 4px 0px #888;">
+                <div style="text-align: center; border-bottom: 2px solid #111; padding-bottom: 5px; margin-bottom: 8px;">
+                    <h3 style="margin: 0; font-size: 16px; letter-spacing:1px;">🏃‍♂️ 越野赛时钟轴硬核路书</h3>
+                    <span style="font-size: 11px; color: #555;">起跑时间：{start_time.strftime("%H:%M")} | 步长：{user_segment_size}米</span>
+                </div>
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: center;">
+                    <thead>
+                        <tr style="background-color: #111; color: #fff;">
+                            <th style="padding:5px; text-align:left;">点位</th>
+                            <th style="padding:5px;">里程</th>
+                            <th style="padding:5px; color:#ff6666;">爬升</th>
+                            <th style="padding:5px;">赛段地形</th>
+                            <th style="padding:5px; background-color:#cccccc; color:#000;">🕒 到达</th>
+                        </tr>
+                    </thead>
+                    <tbody>{card_rows_html}</tbody>
+                </table>
+                <div style="margin-top: 8px; font-size: 10px; text-align: center; color: #444; border-top: 1px dashed #666; padding-top: 5px;">
+                    里程: {total_dist:.2f}km | 总用时: {hours}h {mins}m | 祝完赛！
+                </div>
             </div>
-            <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: center;">
-                <thead>
-                    <tr style="background-color: #111; color: #fff;">
-                        <th style="padding:4px; text-align:left;">点位</th>
-                        <th style="padding:4px;">里程</th>
-                        <th style="padding:4px; color:#ff6666;">爬升</th>
-                        <th style="padding:4px;">赛段地形线</th>
-                        <th style="padding:4px; background-color:#cccccc; color:#000;">🕒 到达</th>
-                    </tr>
-                </thead>
-                <tbody>{card_rows_html}</tbody>
-            </table>
-            <div style="margin-top: 8px; font-size: 10px; text-align: center; color: #444; border-top: 1px dashed #666; padding-top: 5px;">
-                总长: {total_dist:.2f}km | 预估总时: {hours}h {mins}m | 祝安全完赛！
+            
+            <div style="margin-top:15px;" class="no-print">
+                <button onclick="window.print()" style="padding: 10px 18px; background-color: #222; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size:13px;">🖨️ 启动打印机调配面板：点击直接打印</button>
             </div>
-        </div>
+        </body>
+        </html>
         """
-        st.components.v1.html(html_pacing_card, height=480, scrolling=True)
-        st.markdown('<button onclick="window.print()" style="padding: 10px 20px; background-color: #222; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">🖨️ 一键打印：输出实体便携手腕路书</button>', unsafe_allow_html=True)
+        
+        calculated_card_height = 140 + len(plot_segments) * 45
+        st.components.v1.html(html_pacing_card_page, height=max(calculated_card_height, 300), scrolling=False)
